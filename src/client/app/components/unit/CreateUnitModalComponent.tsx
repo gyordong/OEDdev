@@ -10,13 +10,14 @@ import '../../styles/modal.css';
 import { TrueFalseType } from '../../types/items';
 import TooltipMarkerComponent from '../TooltipMarkerComponent';
 import TooltipHelpComponent from '../../components/TooltipHelpComponent';
-import { UnitRepresentType, DisplayableType, UnitType } from '../../types/redux/units';
+import { UnitRepresentType, DisplayableType, UnitType, DisableChecksType } from '../../types/redux/units';
 import { tooltipBaseStyle } from '../../styles/modalStyle';
 import { unitsApi } from '../../redux/api/unitsApi';
 import { useTranslate } from '../../redux/componentHooks';
 import { showSuccessNotification, showErrorNotification } from '../../utils/notifications';
+import { MIN_VAL, MAX_VAL } from '../../utils/input';
 import { LineGraphRates } from '../../types/redux/graph';
-import { customRateValid } from '../../utils/unitInput';
+import { customRateValid, isCustomRate } from '../../utils/unitInput';
 
 /**
  * Defines the create unit modal form
@@ -25,6 +26,7 @@ import { customRateValid } from '../../utils/unitInput';
 export default function CreateUnitModalComponent() {
 	const translate = useTranslate();
 	const [submitCreateUnit] = unitsApi.useAddUnitMutation();
+	const CUSTOM_INPUT = '-77';
 
 	const defaultValues = {
 		name: '',
@@ -33,29 +35,28 @@ export default function CreateUnitModalComponent() {
 		unitRepresent: UnitRepresentType.quantity,
 		displayable: DisplayableType.all,
 		preferredDisplay: true,
-		secInRate: 3600,
+		secInRate: LineGraphRates.hour * 3600,
 		suffix: '',
 		note: '',
 		// These two values are necessary but are not used.
 		// The client code makes the id for the selected unit and default graphic unit be -99
 		// so it can tell it is not yet assigned and do the correct logic for that case.
 		// The units API expects these values to be undefined on call so that the database can assign their values.
-		id: -99
+		id: -99,
+		minVal: MIN_VAL,
+		maxVal: MAX_VAL,
+		disableChecks: DisableChecksType.reject_all
 	};
+
 	/* State */
 	// Unlike EditUnitModalComponent, there are no props so we don't pass show and close via props.
 	// Modal show
-	const CUSTOM_INPUT = '-99';
 	const [showModal, setShowModal] = useState(false);
-
 	// Handlers for each type of input change
+	// Current unit values
 	const [state, setState] = useState(defaultValues);
-	const handleStringChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-		setState({ ...state, [e.target.name]: e.target.value });
-	};
-	const handleBooleanChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-		setState({ ...state, [e.target.name]: JSON.parse(e.target.value) });
-	};
+	// If user can save
+	const [canSave, setCanSave] = useState(false);
 	// Sets the starting rate for secInRate box, value of 3600 is chosen as default to result in Hour as default in dropdown box.
 	const [rate, setRate] = useState(String(defaultValues.secInRate));
 	// Holds the value during custom value input and it is separate from standard choices.
@@ -63,9 +64,42 @@ export default function CreateUnitModalComponent() {
 	const [customRate, setCustomRate] = useState(1);
 	// should only update customRate when save all is clicked
 	// This should keep track of rate's value and set custom rate equal to it when custom rate is clicked
-	// This should set customRate's data to
 	// True if custom value input is active.
 	const [showCustomInput, setShowCustomInput] = useState(false);
+
+	const handleStringChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+		setState({ ...state, [e.target.name]: e.target.value });
+	};
+
+	const handleBooleanChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+		setState({ ...state, [e.target.name]: JSON.parse(e.target.value) });
+	};
+
+	const handleNumberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+		setState({ ...state, [e.target.name]: Number(e.target.value) });
+	};
+
+	/**
+	 * Updates the rate (both custom and regular state) including setting if custom.
+	 * @param newRate The new rate to set.
+	 */
+	const updateRates = (newRate: number) => {
+		const isCustom = isCustomRate(newRate);
+		setShowCustomInput(isCustom);
+		if (newRate !== Number(CUSTOM_INPUT)) {
+			// Should only update with the new rate if did not just select custom
+			// input from the menu.
+			setCustomRate(newRate);
+		}
+		setRate(isCustom ? CUSTOM_INPUT : newRate.toString());
+	};
+
+	// Keeps react-level state, and redux state in sync for sec. in rate.
+	// Two different layers in state may differ especially when externally updated (chart link, history buttons.)
+	React.useEffect(() => {
+		updateRates(state.secInRate);
+	}, [state.secInRate]);
+
 	/*
 	UI events:
 		- When the user selects a new rate from the dropdown,`rate` is updated.
@@ -74,23 +108,17 @@ export default function CreateUnitModalComponent() {
 		- The initial value of `customRate` is set to the previously chosen value of `rate`
 		- Make sure that when submit button is clicked, that the state.secInRate is set to the correct value.
   */
-	const handleStandardNumberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+	const handleRateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
 		const { value } = e.target;
-		// Check if the custom value option is selected
-		if (value === CUSTOM_INPUT) {
-			setCustomRate(Number(rate));
-			setRate(CUSTOM_INPUT);
-			setShowCustomInput(true);
-		} else {
-			setRate(value);
-			setState({ ...state, [e.target.name]: Number(value) });
-			setShowCustomInput(false);
-		}
+		// The input only allows a number so this should be safe.
+		setState({ ...state, secInRate: Number(value) });
 	};
+
 	const handleCustomRateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
 		const { value } = e.target;
+		// Don't update state here since wait for enter to allow to enter custom value
+		// that starts the same as a standard value.
 		setCustomRate(Number(value));
-		setState({ ...state, secInRate: Number(value) });
 	};
 
 	const handleEnter = (key: string) => {
@@ -101,18 +129,20 @@ export default function CreateUnitModalComponent() {
 			setState({ ...state, secInRate: Number(customRate) });
 		}
 	};
-	/* Create Unit Validation:
-		Name cannot be blank
-		Sec in Rate must be greater than zero
-		If type of unit is suffix their must be a suffix
-	*/
-	const [validUnit, setValidUnit] = useState(false);
+
+	// Keeps canSave state up to date. Checks if valid and if edit made.
 	useEffect(() => {
-		setValidUnit(
-			state.name !== '' && (state.typeOfUnit !== UnitType.suffix
-				|| state.suffix !== '') && customRateValid(Number(state.secInRate))
-		);
-	}, [state.name, state.secInRate, state.typeOfUnit, state.suffix]);
+		// This checks:
+		// - Name cannot be blank
+		// - If type of unit is suffix there must be a suffix
+		// - The rate is set so not the custom input value. This happens if select custom value but don't input with enter.
+		// - The custom rate is a positive integer
+		const validUnit = state.name !== '' &&
+			(state.typeOfUnit !== UnitType.suffix || state.suffix !== '') && state.secInRate !== Number(CUSTOM_INPUT)
+			&& state?.minVal >= MIN_VAL && state?.maxVal <= MAX_VAL && state?.minVal <= state?.maxVal
+			&& customRateValid(Number(state.secInRate));
+		setCanSave(validUnit);
+	}, [state]);
 
 	/* End State */
 
@@ -120,26 +150,20 @@ export default function CreateUnitModalComponent() {
 	// To be used for the discard changes and save button
 	const resetState = () => {
 		setState(defaultValues);
-		resetCustomRate();
+		updateRates(state.secInRate);
 	};
 
-	const handleShow = () => setShowModal(true);
+	const handleShow = () => {
+		setShowModal(true);
+	};
 
 	const handleClose = () => {
 		setShowModal(false);
 		resetState();
 	};
 
-	// Helper function to reset custom rate interval box.
-	const resetCustomRate = () => {
-		setRate(String(defaultValues.secInRate));
-		setShowCustomInput(false);
-	};
-	// Unlike edit, we decided to discard inputs when you choose to leave the page. The reasoning is
-	// that create starts from an empty template.
-
 	// Save
-	const handleSave = () => {
+	const handleSaveChanges = () => {
 		// Close modal first to avoid repeat clicks
 		setShowModal(false);
 		const submitState = {
@@ -162,10 +186,12 @@ export default function CreateUnitModalComponent() {
 			});
 		resetState();
 	};
+
 	const tooltipStyle = {
 		...tooltipBaseStyle,
 		tooltipCreateUnitView: 'help.admin.unitcreate'
 	};
+
 	return (
 		<>
 			{/* Show modal button */}
@@ -190,7 +216,7 @@ export default function CreateUnitModalComponent() {
 							{/* Identifier input */}
 							<Col>
 								<FormGroup>
-									<Label for="identifier">{translate('identifier')}</Label>
+									<Label for='identifier'>{translate('identifier')}</Label>
 									<Input
 										id="identifier"
 										name="identifier"
@@ -233,18 +259,15 @@ export default function CreateUnitModalComponent() {
 										type="select"
 										onChange={e => handleStringChange(e)}
 										value={state.typeOfUnit}
-										invalid={
-											state.typeOfUnit != UnitType.suffix && state.suffix != ''
-										}
+										invalid={state.typeOfUnit != UnitType.suffix && state.suffix != ''}
 									>
 										{Object.keys(UnitType).map(key => {
 											return (
 												<option
 													value={key}
 													key={key}
-													disabled={
-														state.suffix != '' && key != UnitType.suffix
-													}>
+													disabled={state.suffix != '' && key != UnitType.suffix}
+												>
 													{translate(`UnitType.${key}`)}
 												</option>
 											);
@@ -301,8 +324,7 @@ export default function CreateUnitModalComponent() {
 													value={key}
 													key={key}
 													disabled={
-														(state.typeOfUnit == UnitType.meter ||
-															state.suffix != '') &&
+														(state.typeOfUnit == UnitType.meter || state.suffix != '') &&
 														key != DisplayableType.none
 													}
 												>
@@ -352,8 +374,9 @@ export default function CreateUnitModalComponent() {
 										id="secInRate"
 										name="secInRate"
 										type="select"
-										onChange={e => handleStandardNumberChange(e)}
-										value={rate}>
+										value={rate}
+										onChange={e => handleRateChange(e)}
+									>
 										{Object.entries(LineGraphRates).map(
 											([rateKey, rateValue]) => (
 												<option value={rateValue * 3600} key={rateKey}>
@@ -378,6 +401,7 @@ export default function CreateUnitModalComponent() {
 												min={1}
 												invalid={!customRateValid(customRate)}
 												onChange={e => handleCustomRateChange(e)}
+												// This grabs each key hit and then finishes input when hit enter.
 												onKeyDown={e => { handleEnter(e.key); }}
 											/>
 										</>
@@ -396,12 +420,9 @@ export default function CreateUnitModalComponent() {
 										id="suffix"
 										name="suffix"
 										type="text"
-										autoComplete="off"
-										onChange={e => handleStringChange(e)}
 										value={state.suffix}
-										invalid={
-											state.typeOfUnit === UnitType.suffix &&
-											state.suffix === ''
+										onChange={e => handleStringChange(e)}
+										invalid={state.typeOfUnit === UnitType.suffix && state.suffix === ''
 										}
 									/>
 									<FormFeedback>
@@ -410,16 +431,57 @@ export default function CreateUnitModalComponent() {
 								</FormGroup>
 							</Col>
 						</Row>
+						<Row xs='1' lg='2'>
+							{/* minVal input */}
+							<Col><FormGroup>
+								<Label for='minVal'>{translate('min.value')}</Label>
+								<Input id='minVal' name='minVal' type='number'
+									onChange={e => handleNumberChange(e)}
+									min={MIN_VAL}
+									max={state.maxVal}
+									value={state.minVal}
+									invalid={state?.minVal < MIN_VAL || state?.minVal > state?.maxVal} />
+								<FormFeedback>
+									<FormattedMessage id="error.bounds" values={{ min: MIN_VAL, max: state.maxVal }} />
+								</FormFeedback>
+							</FormGroup></Col>
+							{/* maxVal input */}
+							<Col><FormGroup>
+								<Label for='maxVal'>{translate('max.value')}</Label>
+								<Input id='maxVal' name='maxVal' type='number'
+									onChange={e => handleNumberChange(e)}
+									min={state.minVal}
+									max={MAX_VAL}
+									value={state.maxVal}
+									invalid={state?.maxVal > MAX_VAL || state?.minVal > state?.maxVal} />
+								<FormFeedback>
+									<FormattedMessage id="error.bounds" values={{ min: state.minVal, max: MAX_VAL }} />
+								</FormFeedback>
+							</FormGroup></Col>
+						</Row>
+						<Row xs='1' lg='2'>
+							{/* DisableChecks input */}
+							<Col><FormGroup>
+								<Label for='disableChecks'>{translate('disable.checks')}</Label>
+								<Input id='disableChecks' name='disableChecks' type='select'
+									onChange={e => handleStringChange(e)}
+									value={state.disableChecks}>
+									{Object.keys(DisableChecksType).map(key => {
+										return (<option value={key} key={key} >
+											{translate(`DisableChecksType.${key}`)}</option>);
+									})}
+								</Input>
+							</FormGroup></Col>
+						</Row>
 						{/* Note input */}
 						<FormGroup>
-							<Label for="note">{translate('note')}</Label>
+							<Label for='note'>{translate('note')}</Label>
 							<Input
-								id="note"
-								name="note"
-								type="textarea"
-								onChange={e => handleStringChange(e)}
+								id='note'
+								name='note'
+								type='textarea'
 								value={state.note}
-							/>
+								onChange={e => handleStringChange(e)} />
 						</FormGroup>
 					</Container>
 				</ModalBody>
@@ -429,7 +491,7 @@ export default function CreateUnitModalComponent() {
 						<FormattedMessage id="discard.changes" />
 					</Button>
 					{/* On click calls the function handleSaveChanges in this component */}
-					<Button color="primary" onClick={handleSave} disabled={!validUnit}>
+					<Button color="primary" onClick={handleSaveChanges} disabled={!canSave}>
 						<FormattedMessage id="save.all" />
 					</Button>
 				</ModalFooter>
