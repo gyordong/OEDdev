@@ -16,13 +16,14 @@ import { useAppSelector } from '../../redux/reduxHooks';
 import '../../styles/modal.css';
 import { tooltipBaseStyle } from '../../styles/modalStyle';
 import { TrueFalseType } from '../../types/items';
-import { DisplayableType, UnitData, UnitRepresentType, UnitType } from '../../types/redux/units';
+import { DisableChecksType, DisplayableType, UnitData, UnitRepresentType, UnitType } from '../../types/redux/units';
 import { conversionArrow } from '../../utils/conversionArrow';
 import { showErrorNotification, showSuccessNotification } from '../../utils/notifications';
 import ConfirmActionModalComponent from '../ConfirmActionModalComponent';
 import TooltipMarkerComponent from '../TooltipMarkerComponent';
+import { MIN_VAL, MAX_VAL } from '../../utils/input';
 import { LineGraphRates } from '../../types/redux/graph';
-import { customRateValid } from '../../utils/unitInput';
+import { customRateValid, isCustomRate } from '../../utils/unitInput';
 
 interface EditUnitModalComponentProps {
 	show: boolean;
@@ -42,17 +43,29 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 	const translate = useTranslate();
 	const [submitEditedUnit] = unitsApi.useEditUnitMutation();
 	const [deleteUnit] = unitsApi.useDeleteUnitMutation();
-	const CUSTOM_INPUT = '-99';
+	const CUSTOM_INPUT = '-77';
 
 	// Set existing unit values
 	const values = { ...props.unit };
 
 	/* State */
 	// Handlers for each type of input change
+	// Current unit values
 	const [state, setState] = useState(values);
-	const [customRate, setCustomRate] = useState(1);
-	const [showCustomInput, setShowCustomInput] = useState(false);
+	// Stores if save should be allowed but check for use by a meter is delayed until
+	// save is hit to avoid doing a lot and to give error message then.
+	const [canSave, setCanSave] = useState(false);
+	// The rate for the unit
 	const [rate, setRate] = useState(String(state.secInRate));
+	// Holds the value during custom value input and it is separate from standard choices.
+	// Needs to be valid at start and overwritten before used.
+	const [customRate, setCustomRate] = useState(1);
+	// should only update customRate when save all is clicked
+	// This should keep track of rate's value and set custom rate equal to it when custom rate is clicked
+	// True if custom value input is active.
+	const [showCustomInput, setShowCustomInput] = useState(false);
+
+	// State needed to verify input
 	const conversionData = useAppSelector(selectConversionsDetails);
 	const meterDataByID = useAppSelector(selectMeterDataById);
 	const unitDataByID = useAppSelector(selectUnitDataById);
@@ -65,20 +78,8 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 		setState({ ...state, [e.target.name]: JSON.parse(e.target.value) });
 	};
 
-	/**
-	 * Determines if the rate is custom.
-	 * @param rate The rate to check
-	 * @returns true if the rate is custom and false if it is a standard value.
-	 */
-	const isCustomRate = (rate: number) => {
-		// Loop over all standard rates to see if the rate is one of these.
-		// If is then return false, otherwise true.
-		return !Object.entries(LineGraphRates).some(
-			([, rateValue]) => {
-				// Since the rateValue is a floating point number and rate is an integer,
-				// round to nearest integer to avoid issues with compare.
-				return Math.round(rateValue * 3600) === rate;
-			});
+	const handleNumberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+		setState({ ...state, [e.target.name]: Number(e.target.value) });
 	};
 
 	/**
@@ -193,18 +194,16 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 		}
 	};
 
-	// Stores if save should be allowed but check for use by a meter is delayed until
-	// save is hit to avoid doing a lot and to give error message then.
-	const [canSave, setCanSave] = useState(false);
 	// Keeps canSave state up to date. Checks if valid and if edit made.
 	useEffect(() => {
 		// This checks:
 		// - Name cannot be blank
-		// - If type of unit is suffix their must be a suffix
+		// - If type of unit is suffix there must be a suffix
 		// - The rate is set so not the custom input value. This happens if select custom value but don't input with enter.
 		// - The custom rate is a positive integer
 		const validUnit = state.name !== '' &&
 			(state.typeOfUnit !== UnitType.suffix || state.suffix !== '') && state.secInRate !== Number(CUSTOM_INPUT)
+			&& state?.minVal >= MIN_VAL && state?.maxVal <= MAX_VAL && state?.minVal <= state?.maxVal
 			&& customRateValid(Number(state.secInRate));
 		// Compare original props to state to see if edit made. Check above avoids thinking edit happened if
 		// custom edit started without enter hit.
@@ -217,9 +216,13 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 			|| props.unit.preferredDisplay !== state.preferredDisplay
 			|| props.unit.secInRate !== state.secInRate
 			|| props.unit.suffix !== state.suffix
-			|| props.unit.note !== state.note;
+			|| props.unit.note !== state.note
+			|| props.unit.minVal != state.minVal
+			|| props.unit.maxVal != state.maxVal
+			|| props.unit.disableChecks != state.disableChecks;
 		setCanSave(validUnit && editMade);
 	}, [state]);
+
 	/* End State */
 
 	// Reset the state to default values
@@ -291,7 +294,7 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 				displayable: (state.typeOfUnit === UnitType.meter && state.displayable !== DisplayableType.none) ? DisplayableType.none : state.displayable,
 				// set unit to suffix if suffix is not empty
 				typeOfUnit: (state.typeOfUnit !== UnitType.suffix && state.suffix !== '') ? UnitType.suffix : state.typeOfUnit
-			}
+			};
 
 			// Need to redo Cik if the suffix, displayable, or type of unit changes.
 			// For displayable, it only matters if it changes from/to NONE but a more general check is used here for simplification.
@@ -302,6 +305,8 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 			const shouldRefreshReadingViews = props.unit.unitRepresent !== state.unitRepresent
 				|| (props.unit.secInRate !== state.secInRate
 					&& (props.unit.unitRepresent === UnitRepresentType.flow || props.unit.unitRepresent === UnitRepresentType.raw));
+
+
 
 			// Save our changes by dispatching the submitEditedUnit mutation
 			submitEditedUnit({ editedUnit: submitState, shouldRedoCik, shouldRefreshReadingViews })
@@ -363,8 +368,7 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 										type='text'
 										autoComplete='on'
 										onChange={e => handleStringChange(e)}
-										value={state.identifier}
-										placeholder='Identifier' />
+										value={state.identifier} />
 								</FormGroup>
 							</Col>
 							{/* Name input */}
@@ -396,10 +400,18 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 										type='select'
 										onChange={e => handleStringChange(e)}
 										value={state.typeOfUnit}
-										invalid={state.typeOfUnit !== UnitType.suffix && state.suffix !== ''}>
+										invalid={state.typeOfUnit !== UnitType.suffix && state.suffix !== ''}
+									>
 										{Object.keys(UnitType).map(key => {
-											return (<option value={key} key={key} disabled={state.suffix !== '' && key !== UnitType.suffix}>
-												{translate(`UnitType.${key}`)}</option>);
+											return (
+												<option
+													value={key}
+													key={key}
+													disabled={state.suffix !== '' && key !== UnitType.suffix}
+												>
+													{translate(`UnitType.${key}`)}
+												</option>
+											);
 										})}
 									</Input>
 									<FormFeedback>
@@ -417,9 +429,13 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 										type='select'
 										value={state.unitRepresent}
 										disabled={inConversions()}
-										onChange={e => handleStringChange(e)}>
+										onChange={e => handleStringChange(e)}
+									>
 										{Object.keys(UnitRepresentType).map(key => {
-											return (<option value={key} key={key}>{translate(`UnitRepresentType.${key}`)}</option>);
+											return (
+												<option value={key} key={key}>
+													{translate(`UnitRepresentType.${key}`)}
+												</option>);
 										})}
 									</Input>
 								</FormGroup>
@@ -436,10 +452,23 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 										type='select'
 										value={state.displayable}
 										onChange={e => handleStringChange(e)}
-										invalid={state.displayable !== DisplayableType.none && (state.typeOfUnit === UnitType.meter || state.suffix !== '')}>
+										invalid={
+											state.displayable !== DisplayableType.none &&
+											(state.typeOfUnit === UnitType.meter || state.suffix !== '')
+										}
+									>
 										{Object.keys(DisplayableType).map(key => {
-											return (<option value={key} key={key} disabled={(state.typeOfUnit === UnitType.meter || state.suffix !== '') && key !== DisplayableType.none}>
-												{translate(`DisplayableType.${key}`)}</option>);
+											return (<option
+												value={key}
+												key={key}
+												disabled={
+													(state.typeOfUnit === UnitType.meter || state.suffix !== '') &&
+													key !== DisplayableType.none
+												}
+											>
+												{translate(`DisplayableType.${key}`)}
+											</option>
+											);
 										})}
 									</Input>
 									<FormFeedback>
@@ -462,7 +491,11 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 										value={state.preferredDisplay.toString()}
 										onChange={e => handleBooleanChange(e)}>
 										{Object.keys(TrueFalseType).map(key => {
-											return (<option value={key} key={key}>{translate(`TrueFalseType.${key}`)}</option>);
+											return (
+												<option value={key} key={key}>
+													{translate(`TrueFalseType.${key}`)}
+												</option>
+											);
 										})}
 									</Input>
 								</FormGroup>
@@ -523,7 +556,6 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 										name='suffix'
 										type='text'
 										value={state.suffix}
-										placeholder='Suffix'
 										onChange={e => handleStringChange(e)}
 										invalid={state.typeOfUnit === UnitType.suffix && state.suffix === ''} />
 									<FormFeedback>
@@ -532,19 +564,59 @@ export default function EditUnitModalComponent(props: EditUnitModalComponentProp
 								</FormGroup>
 							</Col>
 						</Row>
+						<Row xs='1' lg='2'>
+							{/* minVal input */}
+							<Col><FormGroup>
+								<Label for='minVal'>{translate('min.value')}</Label>
+								<Input id='minVal' name='minVal' type='number'
+									onChange={e => handleNumberChange(e)}
+									min={MIN_VAL}
+									max={state.maxVal}
+									required value={state.minVal}
+									invalid={state?.minVal < MIN_VAL || state?.minVal > state?.maxVal} />
+								<FormFeedback>
+									<FormattedMessage id="error.bounds" values={{ min: MIN_VAL, max: state.maxVal }} />
+								</FormFeedback>
+							</FormGroup></Col>
+							{/* maxVal input */}
+							<Col><FormGroup>
+								<Label for='maxVal'>{translate('max.value')}</Label>
+								<Input id='maxVal' name='maxVal' type='number'
+									onChange={e => handleNumberChange(e)}
+									min={state.minVal}
+									max={MAX_VAL}
+									required value={state.maxVal}
+									invalid={state?.maxVal > MAX_VAL || state?.minVal > state?.maxVal} />
+								<FormFeedback>
+									<FormattedMessage id="error.bounds" values={{ min: state.minVal, max: MAX_VAL }} />
+								</FormFeedback>
+							</FormGroup></Col>
+						</Row>
+						<Row xs='1' lg='2'>
+							{/* DisableChecks input */}
+							<Col><FormGroup>
+								<Label for='disableChecks'>{translate('disable.checks')}</Label>
+								<Input id='disableChecks' name='disableChecks' type='select'
+									onChange={e => handleStringChange(e)}
+									value={state.disableChecks}>
+									{Object.keys(DisableChecksType).map(key => {
+										return (<option value={key} key={key} >
+											{translate(`DisableChecksType.${key}`)}</option>);
+									})}
+								</Input>
+							</FormGroup></Col>
+						</Row>
 						{/* Note input */}
 						<FormGroup>
-							<Label for='note'>{translate('unit')}</Label>
+							<Label for='note'>{translate('note')}</Label>
 							<Input
 								id='note'
 								name='note'
 								type='textarea'
 								value={state.note}
-								placeholder='Note'
 								onChange={e => handleStringChange(e)} />
 						</FormGroup>
-					</Container>
-				</ModalBody>
+					</Container></ModalBody>
 				<ModalFooter>
 					<Button variant="warning" color='danger' onClick={handleDeleteConfirmationModalOpen}>
 						<FormattedMessage id="unit.delete.unit" />
